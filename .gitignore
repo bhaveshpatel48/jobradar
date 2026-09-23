@@ -1,0 +1,14 @@
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+node_modules/
+dist/
+.DS_Store

@@ -1,0 +1,47 @@
+// Empty base = same origin, which is how the nginx container serves it.
+const BASE = import.meta.env.VITE_API_BASE_URL ?? ''
+
+async function request(path, options = {}) {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
+    ...options,
+  })
+  const text = await res.text()
+  const data = text ? JSON.parse(text) : null
+  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`)
+  return data
+}
+
+export const api = {
+  health: () => request('/api/health'),
+
+  jobs: (params = {}) => {
+    const q = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') q.set(k, v)
+    })
+    const qs = q.toString()
+    return request(`/api/jobs${qs ? `?${qs}` : ''}`)
+  },
+  updateJob: (id, status) =>
+    request(`/api/jobs/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+
+  companies: () => request('/api/companies'),
+  addCompany: (payload) =>
+    request('/api/companies', { method: 'POST', body: JSON.stringify(payload) }),
+  deleteCompany: (id) => request(`/api/companies/${id}`, { method: 'DELETE' }),
+  companyProfile: (id) => request(`/api/companies/${id}/profile`),
+
+  settings: () => request('/api/settings'),
+  saveSettings: (payload) =>
+    request('/api/settings', { method: 'POST', body: JSON.stringify(payload) }),
+  uploadResume: (file) => {
+    const fd = new FormData()
+    fd.append('resume', file)
+    return request('/api/settings/resume', { method: 'POST', body: fd })
+  },
+
+  rescore: () => request('/api/rescore', { method: 'POST' }),
+  purgeResearch: () => request('/api/data/research', { method: 'DELETE' }),
+  wipeAll: () => request('/api/data/all', { method: 'DELETE' }),
+}

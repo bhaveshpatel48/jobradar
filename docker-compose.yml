@@ -1,0 +1,54 @@
+x-backend: &backend
+  build: .
+  env_file: .env
+  environment:
+    DB_PATH: /data/jobradar.db
+  volumes:
+    - ./data:/data
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *backend
+    container_name: jobradar-api
+    ports:
+      - "${API_HOST_PORT:-8088}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  scraper-worker:
+    <<: *backend
+    container_name: jobradar-scraper
+    # Autostarts the loop on container start; also runnable standalone via
+    #   docker compose run --rm scraper-worker python scraper_worker.py --once
+    command: python scraper_worker.py --loop
+    environment:
+      DB_PATH: /data/jobradar.db
+      RUN_SCRAPER_IN_APP: "false"
+    depends_on:
+      - api
+
+  agent-worker:
+    <<: *backend
+    container_name: jobradar-agent
+    command: python agent_worker.py --loop
+    depends_on:
+      - api
+
+  ui:
+    build:
+      context: ./ui
+      args:
+        # Baked in at build time by Vite. Empty means same-origin, so the
+        # browser hits nginx, which proxies /api to the api service.
+        VITE_API_BASE_URL: ""
+    container_name: jobradar-ui
+    ports:
+      - "${UI_HOST_PORT:-5174}:80"
+    depends_on:
+      - api
+    restart: unless-stopped
