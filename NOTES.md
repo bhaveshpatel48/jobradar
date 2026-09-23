@@ -123,8 +123,48 @@ Against a live Greenhouse board (627 postings) and the running stack:
 - **Comeet and Jobvite are not supported**: Comeet needs a token scraped out of
   HTML, and Jobvite is HTML only.
 
+## Round 3: fit buttons, company grouping + pagination, salary
+
+### Incident: the test suite wrote to the live database
+
+I moved test isolation into `tests/__init__.py`. But `unittest discover tests`
+imports test files as top-level modules, so that file never ran, and the tests
+fell back to `.env`'s `DB_PATH`, the live database. One run cleared
+`companies`, `jobs` and `job_queue`, and overwrote `user_settings.interests`
+and `resume_structured`.
+
+- **Restored:** the Linear company (re-scraped, 31 jobs) and interests
+  `["backend", "Python", "Senior Software Engineer"]`, the last value read
+  before the incident.
+- **Not recoverable:** original first-seen dates, any per-job status, and the
+  parsed resume. The resume text survived, so re-uploading re-parses it.
+- A snapshot taken just before the restore is at `data/jobradar.before-restore.db`.
+- **Fix:** every test module imports `tests` first, and `assert_isolated()`
+  refuses to run against anything but the temp database. I verified the live DB
+  was unchanged across `discover tests`, `discover -s tests -t .` and
+  single-module runs.
+
+### Also fixed
+
+- **Silent non-scores:** transient Gemini 503s were caught inside the matcher,
+  which returned "no result", and the task was then marked done, so jobs were
+  never scored or retried. 5xx errors are now retried once, then raised as
+  `LLMTemporarilyUnavailable`, which requeues the task.
+- **Retry cost:** the SDK doesn't retry by default (no double retries), but
+  failed requests appear to count toward the 20/day free quota. So there's
+  one transient retry, not several.
+- "Check fit for all N" counted jobs that were already queued; it now counts
+  only jobs still needing a request.
+- A Greenhouse hourly range showed without a period ("$45.2–80.3"); the range
+  title now drives the period, falling back to magnitude.
+- A resume that failed to parse because the quota was spent said "needs a
+  Gemini API key"; it now gives the real reason.
+
 ## Not verified
 
+- **A live "Check my fit" score.** The quota was spent before it could run.
+  The flow was checked with the matcher stubbed, both in the API tests and in
+  a browser preview (82% badge, "Why this matches", "Re-check fit").
 - **Live AI search and live discovery.** Both are built and exercised to the
   point of the Gemini call, and discovery's verification half was tested with
   fixed proposals. The daily quota ran out before a live end-to-end run.

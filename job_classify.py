@@ -27,7 +27,7 @@ _NON_ENG_TITLE = re.compile(
     r"recruit(er|ing)?|talent|sourcer|partner(ship)?s?|marketing|growth marketing|"
     r"counsel|legal|paralegal|finance|accountant|payroll|"
     r"program manager|product manager|project manager|"
-    r"designer|writer|content|communications|policy|operations manager|"
+    r"designer|user experience|ux|writer|content|communications|policy|operations manager|"
     r"executive assistant|office|workplace"
     r")\b",
     re.I,

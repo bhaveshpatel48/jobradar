@@ -1,6 +1,15 @@
 // Empty base = same origin, which is how the nginx container serves it.
 const BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 
+function qs(params) {
+  const q = new URLSearchParams()
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') q.set(k, v)
+  })
+  const s = q.toString()
+  return s ? `?${s}` : ''
+}
+
 async function request(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
     headers: options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
@@ -16,18 +25,18 @@ export const api = {
   health: () => request('/api/health'),
   clearQuota: () => request('/api/llm/quota/clear', { method: 'POST' }),
 
-  jobs: (params = {}) => {
-    const q = new URLSearchParams()
-    Object.entries(params).forEach(([k, v]) => {
-      if (v !== undefined && v !== null && v !== '') q.set(k, v)
-    })
-    const qs = q.toString()
-    return request(`/api/jobs${qs ? `?${qs}` : ''}`)
-  },
+  jobs: (params = {}) => request(`/api/jobs${qs(params)}`),
+  jobsGrouped: (params = {}) => request(`/api/jobs/grouped${qs(params)}`),
   updateJob: (id, status) =>
     request(`/api/jobs/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
-  aiSearch: (query, filters) =>
-    request('/api/jobs/ai-search', { method: 'POST', body: JSON.stringify({ query, filters }) }),
+  aiSearch: (query, filters, page, page_size) =>
+    request('/api/jobs/ai-search', {
+      method: 'POST',
+      body: JSON.stringify({ query, filters, page, page_size }),
+    }),
+  scoreJob: (id) => request(`/api/jobs/${id}/score`, { method: 'POST' }),
+  scoreJobs: (filters) =>
+    request('/api/jobs/score', { method: 'POST', body: JSON.stringify({ filters, only_unscored: true }) }),
 
   ats: () => request('/api/ats'),
 

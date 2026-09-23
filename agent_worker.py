@@ -12,16 +12,14 @@ Modes:
 
 import argparse
 import asyncio
-import json
 import logging
 import time
 
-import ats_scraper
-import sitefetch
+import scoring
 import task_queue as job_queue
 from agents import company_discovery, company_research, matcher, people_finder
 from config import AGENT_POLL_INTERVAL_SECONDS, COMPANY_RESEARCH_TTL_DAYS
-from db import get_conn, get_settings, init_db, transaction
+from db import get_conn, init_db, transaction
 from llm import gemini
 
 log = logging.getLogger(__name__)
@@ -29,47 +27,6 @@ log = logging.getLogger(__name__)
 RATE_LIMIT_BACKOFF_SECONDS = 60
 QUOTA_RECHECK_SECONDS = 30 * 60
 DRAIN_BATCH = 10
-
-
-def _load_job(job_id: int) -> dict | None:
-    with get_conn() as conn:
-        row = conn.execute(
-            """SELECT j.*, c.name AS company_name, c.website AS company_website,
-                      c.platform AS company_platform, c.board_token AS company_token,
-                      c.research_attempted_at, c.people_attempted_at
-               FROM jobs j JOIN companies c ON c.id = j.company_id
-               WHERE j.id = ?""",
-            (job_id,),
-        ).fetchone()
-        return dict(row) if row else None
-
-
-def _decoded_settings() -> dict:
-    settings = get_settings()
-    for field in ("resume_structured", "interests", "domains"):
-        raw = settings.get(field)
-        if raw:
-            try:
-                settings[field] = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                pass
-    return settings
-
-
-def _store_match(job_id: int, result: dict) -> None:
-    with get_conn() as conn:
-        conn.execute(
-            """UPDATE jobs SET match_score=?, match_reasoning=?, match_matched_skills=?,
-                   match_concerns=?, matched_at=? WHERE id=?""",
-            (
-                result["match_score"],
-                result["reasoning"],
-                json.dumps(result["matched_skills"]),
-                json.dumps(result["concerns"]),
-                time.time(),
-                job_id,
-            ),
-        )
 
 
 def _attempt_is_fresh(attempted_at: float | None) -> bool:
@@ -83,13 +40,16 @@ def _mark_attempt(company_id: int, column: str) -> None:
 
 
 async def process_task(task: dict) -> None:
-    job = _load_job(task["job_id"])
+    job = scoring.load_job(task["job_id"])
     if job is None:
         log.warning("job %s no longer exists", task["job_id"])
         return
 
-    settings = _decoded_settings()
-    if settings.get("engineering_only") and not job.get("is_engineering"):
+    settings = scoring.decoded_settings()
+    # A "score" task is an explicit user request, so the automatic gates
+    # (engineering-only, remote pre-filter) don't apply to it.
+    requested = task["task_type"] == job_queue.USER_REQUESTED
+    if not requested and settings.get("engineering_only") and not job.get("is_engineering"):
         return
 
     company_id = job["company_id"]
@@ -110,23 +70,11 @@ async def process_task(task: dict) -> None:
         log.info("no resume/interests saved yet; leaving job %s unscored", job["id"])
         return
 
-    if not matcher.passes_prefilter(job, settings):
+    if not requested and not matcher.passes_prefilter(job, settings):
         log.info("job %s filtered out before scoring (%s)", job["id"], job["remote_type"])
         return
 
-    if not job.get("description"):
-        description = await ats_scraper.fetch_description(
-            job["company_platform"], job["company_token"], job["external_id"]
-        ) or await sitefetch.fetch_job_description(job.get("url"))
-        if description:
-            job["description"] = description
-            with get_conn() as conn:
-                conn.execute("UPDATE jobs SET description = ? WHERE id = ?", (description, job["id"]))
-
-    result = await matcher.score_job(job, settings, profile)
-    if result:
-        _store_match(job["id"], result)
-        log.info("scored job %s: %s", job["id"], result["match_score"])
+    await scoring.score_and_store(job, settings, profile)
 
 
 async def drain_queue(limit: int | None = None) -> int:
@@ -187,7 +135,7 @@ async def run_pending_discovery() -> bool:
     log.info("discovery run %s started", run["id"])
     status, error, added = "done", None, 0
     try:
-        added = await company_discovery.run_discovery(run["id"], _decoded_settings(), run["query"])
+        added = await company_discovery.run_discovery(run["id"], scoring.decoded_settings(), run["query"])
     except Exception as exc:  # noqa: BLE001 - record the failure on the run
         log.exception("discovery run %s failed", run["id"])
         status, error = "failed", str(exc)[:1000]

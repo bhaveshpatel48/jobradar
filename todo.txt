@@ -1,0 +1,17 @@
+- use struct logging
+- Ensure no duplicate jobs are present
+- Use seperate table to store the raw scrapped jobs. Then use the different table to store the quality jobs after the initial algorithmic matching score.
+- Remove the jobs with < 50% match score form db or do not store it on the quality job table
+- Focus on quality jobs to save by using the initial programaticaaly matching of job requirements and the preference -> later the ai match can be done.
+- Provide filter on UI to show the list from the raw or quality table
+- Quality jobs are based on the resume and preferences user set
+
+
+
+Advanced
+- This shoud support the multiple vendors for the LLM and the calls should be openai format or standard followed
+- This can be later make a call to self hosted llm as well with openai schema contract
+- Use the inference routing based on the complexity of the work
+- Scale for other users
+- Use postgresql
+- 

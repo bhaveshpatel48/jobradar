@@ -6,6 +6,12 @@ from db import get_conn, transaction
 
 MAX_ATTEMPTS = 3
 
+# Task types: automatic scoring of a newly scraped job, a settings-driven
+# re-score, and an explicit user request ("Check fit" in bulk).
+NEW_JOB = "enrich_and_match"
+RESCORE = "rescore_only"
+USER_REQUESTED = "score"
+
 
 def enqueue(job_id: int, task_type: str = "enrich_and_match") -> None:
     with get_conn() as conn:
@@ -23,12 +29,31 @@ def enqueue(job_id: int, task_type: str = "enrich_and_match") -> None:
         )
 
 
-def enqueue_all_jobs(task_type: str = "rescore_only") -> int:
+def enqueue_all_jobs(task_type: str = RESCORE) -> int:
     with get_conn() as conn:
         rows = conn.execute("SELECT id FROM jobs").fetchall()
     for row in rows:
         enqueue(row["id"], task_type)
     return len(rows)
+
+
+def enqueue_many(job_ids: list[int], task_type: str = USER_REQUESTED) -> int:
+    """Queue several jobs in one transaction; returns how many were newly queued
+    (jobs already waiting in the queue are skipped)."""
+    now = time.time()
+    with get_conn() as conn:
+        queued = {
+            r["job_id"]
+            for r in conn.execute(
+                "SELECT job_id FROM job_queue WHERE status IN ('pending', 'in_progress')"
+            )
+        }
+        fresh = [j for j in dict.fromkeys(job_ids) if j not in queued]
+        conn.executemany(
+            "INSERT INTO job_queue (job_id, task_type, status, created_at) VALUES (?, ?, 'pending', ?)",
+            [(j, task_type, now) for j in fresh],
+        )
+    return len(fresh)
 
 
 def claim_next() -> dict | None:

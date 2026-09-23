@@ -44,7 +44,12 @@ class LLMUnavailable(LLMError):
 
 
 class LLMRateLimited(LLMError):
-    """Quota/rate limit on a plain (non-grounded) call -- retry later."""
+    """Retry later: a rate limit, quota, or temporary outage. Callers must not
+    treat this as a final result -- the work should go back in the queue."""
+
+
+class LLMTemporarilyUnavailable(LLMRateLimited):
+    """Gemini returned 5xx (e.g. 503 "high demand") even after retries."""
 
 
 class LLMQuotaExhausted(LLMRateLimited):
@@ -181,7 +186,27 @@ async def _throttle(priority: str) -> None:
         waited += min(wait, 5.0)
 
 
+TRANSIENT_CODES = (500, 502, 503, 504)
+# One retry only: failed requests appear to count against free-tier daily quota
+# (20/day), so retrying a 503 storm hard can spend the whole day's budget.
+TRANSIENT_BACKOFF_SECONDS = (15,)
+
+
 async def _call(prompt: str, config, *, grounded: bool, priority: str = BACKGROUND):
+    """One logical call, retrying transient 5xx responses with backoff."""
+    attempts = len(TRANSIENT_BACKOFF_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            return await _call_once(prompt, config, grounded=grounded, priority=priority)
+        except LLMTemporarilyUnavailable:
+            if attempt == attempts - 1:
+                raise
+            delay = TRANSIENT_BACKOFF_SECONDS[attempt]
+            log.info("Gemini temporarily unavailable; retrying in %ss", delay)
+            await asyncio.sleep(delay)
+
+
+async def _call_once(prompt: str, config, *, grounded: bool, priority: str):
     global _grounding_blocked_until
     from google.genai import errors
 
@@ -207,6 +232,8 @@ async def _call(prompt: str, config, *, grounded: bool, priority: str = BACKGROU
             raise GroundingUnavailable(str(exc)) from exc
         if code == 429:
             raise LLMRateLimited(str(exc)) from exc
+        if code in TRANSIENT_CODES:
+            raise LLMTemporarilyUnavailable(f"Gemini temporarily unavailable ({code})") from exc
         raise LLMError(f"Gemini API error {code}: {exc}") from exc
     except httpx.HTTPError as exc:
         raise LLMError(f"network error talking to Gemini: {exc}") from exc

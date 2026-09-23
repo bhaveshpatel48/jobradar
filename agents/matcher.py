@@ -21,6 +21,7 @@ Experience range sought: {experience}
 Title: {title}
 Company: {company}
 Location: {location} (classified: {remote_type})
+Posted salary: {job_salary}
 Description: {description}
 
 --- COMPANY PROFILE ---
@@ -47,6 +48,16 @@ def _fmt(value) -> str:
     return str(value)
 
 
+def _job_salary(job: dict) -> str:
+    lo, hi = job.get("salary_min"), job.get("salary_max")
+    if lo or hi:
+        return (
+            f"{lo or '?'}-{hi or '?'} {job.get('salary_currency') or ''} "
+            f"per {job.get('salary_period') or 'year'}"
+        ).strip()
+    return job.get("salary_text") or "not listed"
+
+
 def passes_prefilter(job: dict, settings: dict) -> bool:
     """Cheap hard-constraint check so we don't spend a call on hopeless jobs."""
     if settings.get("remote_only") and job.get("remote_type") == "onsite":
@@ -58,7 +69,9 @@ def has_profile(settings: dict) -> bool:
     return bool(settings.get("resume_structured") or settings.get("interests"))
 
 
-async def score_job(job: dict, settings: dict, company_profile: dict | None) -> dict | None:
+async def score_job(
+    job: dict, settings: dict, company_profile: dict | None, *, priority: str = gemini.BACKGROUND
+) -> dict | None:
     if not gemini.available():
         log.warning("no Gemini key configured; skipping match scoring")
         return None
@@ -95,12 +108,13 @@ async def score_job(job: dict, settings: dict, company_profile: dict | None) -> 
         company=job.get("company_name"),
         location=_fmt(job.get("location")),
         remote_type=job.get("remote_type"),
+        job_salary=_job_salary(job),
         description=_fmt(job.get("description"))[:8000],
         company_profile=profile_text,
     )
 
     try:
-        result = await gemini.generate_json(prompt)
+        result = await gemini.generate_json(prompt, priority=priority)
     except gemini.LLMRateLimited:
         raise
     except (ValueError, gemini.LLMError) as exc:

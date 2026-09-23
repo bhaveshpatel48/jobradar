@@ -18,6 +18,8 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
+import salary
+
 log = logging.getLogger(__name__)
 
 TIMEOUT = httpx.Timeout(25.0)
@@ -105,16 +107,20 @@ def _strip_html(raw: str | None) -> str:
 
 
 def _posting(external_id, title, location=None, url=None, description=None,
-             department=None, native=None) -> dict:
+             department=None, native=None, pay: dict | None = None) -> dict:
+    """`pay` is a structured salary from the ATS (see salary.structured); when
+    absent, a pay range written into the description is used if there is one."""
     location = location or None
+    text = _strip_html(description)
     return {
         "external_id": str(external_id),
         "title": (title or "").strip(),
         "location": location,
         "url": url,
-        "description": _strip_html(description),
+        "description": text,
         "department": (department or "").strip() or None,
         "remote_type": classify_remote(location, title, native),
+        **(pay or salary.parse_salary_text(text) or salary.EMPTY),
     }
 
 
@@ -138,17 +144,33 @@ async def _get_json(client, url: str, **kw):
 
 
 async def scrape_greenhouse(client, token: str) -> list[dict]:
-    # content=true is required: without it departments/offices/content are absent.
-    data = await _get_json(client, f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true")
+    # content=true is required for departments/offices/content; pay_transparency
+    # adds structured pay_input_ranges (amounts in cents).
+    data = await _get_json(
+        client,
+        f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true&pay_transparency=true",
+    )
     out = []
     for job in data.get("jobs", []):
         departments = job.get("departments") or []
+        ranges = job.get("pay_input_ranges") or []
+        pay = None
+        if ranges:
+            r = ranges[0]
+            cents = lambda v: v / 100 if isinstance(v, (int, float)) else None  # noqa: E731
+            # The range title carries the period ("Annual Base Salary Range:",
+            # "Hourly Pay Range:"); structured() reads it.
+            pay = salary.structured(
+                cents(r.get("min_cents")), cents(r.get("max_cents")), r.get("currency_type"),
+                r.get("title"),
+            )
         out.append(_posting(
             job.get("id"), job.get("title"),
             location=(job.get("location") or {}).get("name"),
             url=job.get("absolute_url"),
             description=job.get("content"),
             department=departments[0].get("name") if departments else None,
+            pay=pay,
         ))
     return out
 
@@ -160,6 +182,11 @@ async def scrape_lever(client, token: str) -> list[dict]:
     out = []
     for job in data:
         cats = job.get("categories") or {}
+        rng = job.get("salaryRange") or {}  # per company; absent on many boards
+        pay = salary.structured(
+            rng.get("min"), rng.get("max"), rng.get("currency"), rng.get("interval"),
+            None if rng else job.get("salaryDescriptionPlain"),
+        )
         out.append(_posting(
             job.get("id"), job.get("text"),
             location=cats.get("location"),
@@ -168,17 +195,29 @@ async def scrape_lever(client, token: str) -> list[dict]:
             # Some boards (e.g. Palantir) have no department, only team.
             department=cats.get("department") or cats.get("team"),
             native=_workplace(job.get("workplaceType")),
+            pay=pay,
         ))
     return out
 
 
 async def scrape_ashby(client, token: str) -> list[dict]:
-    data = await _get_json(client, f"https://api.ashbyhq.com/posting-api/job-board/{token}")
+    data = await _get_json(
+        client, f"https://api.ashbyhq.com/posting-api/job-board/{token}?includeCompensation=true"
+    )
     out = []
     for job in data.get("jobs", []):
         if job.get("isListed") is False:
             continue
         department, team = job.get("department"), job.get("team")
+        comp = job.get("compensation") or {}
+        # summaryComponents also holds equity/bonus items; only Salary is pay.
+        base = next(
+            (c for c in comp.get("summaryComponents") or [] if c.get("compensationType") == "Salary"), {}
+        )
+        pay = salary.structured(
+            base.get("minValue"), base.get("maxValue"), base.get("currencyCode"), base.get("interval"),
+            comp.get("scrapeableCompensationSalarySummary"),
+        )
         out.append(_posting(
             job.get("id"), job.get("title"),
             location=job.get("location"),
@@ -189,6 +228,7 @@ async def scrape_ashby(client, token: str) -> list[dict]:
             department=" / ".join(dict.fromkeys(filter(None, (department, team)))),
             # isRemote is true for Hybrid jobs too -- workplaceType is authoritative.
             native=_workplace(job.get("workplaceType")),
+            pay=pay,
         ))
     return out
 
@@ -247,6 +287,10 @@ async def scrape_recruitee(client, token: str) -> list[dict]:
         native = "remote" if job.get("remote") else "hybrid" if job.get("hybrid") else (
             "onsite" if job.get("on_site") else None
         )
+        sal = job.get("salary") or {}  # min/max are strings; all-null when unset
+        pay = salary.structured(sal.get("min"), sal.get("max"), sal.get("currency"), sal.get("period"))
+        if pay and pay["salary_min"] is None and pay["salary_max"] is None:
+            pay = None
         out.append(_posting(
             job.get("id"), job.get("title"),
             location=job.get("location"),
@@ -254,6 +298,7 @@ async def scrape_recruitee(client, token: str) -> list[dict]:
             description=" ".join(filter(None, (job.get("description"), job.get("requirements")))),
             department=job.get("department"),
             native=native,
+            pay=pay,
         ))
     return out
 
@@ -334,12 +379,18 @@ async def scrape_breezy(client, token: str) -> list[dict]:
         loc = job.get("location") or {}
         remote_detail = ((loc.get("remote_details") or {}).get("value") or "").lower()
         native = "remote" if loc.get("is_remote") or remote_detail.startswith("remote") else None
+        # A pre-formatted string, e.g. "$90,000 – $110,000 / year", or "".
+        text = (job.get("salary") or "").strip()
+        pay = (salary.parse_salary_text(text) or salary.structured(text=text)) if text else None
+        if pay:
+            pay["salary_source"] = "ats"
         out.append(_posting(
             job.get("id"), job.get("name"),
             location=loc.get("name"),
             url=job.get("url"),
             department=job.get("department"),
             native=native,
+            pay=pay,
         ))
     return out
 
@@ -360,12 +411,20 @@ async def scrape_personio(client, token: str) -> list[dict]:
             (d.findtext("value") or "") for d in pos.iter("jobDescription")
         )
         job_id = text("id")
+        info = pos.find("salaryInformation")  # rare; <max> may be missing
+        pay = None
+        if info is not None:
+            pay = salary.structured(
+                info.findtext("min"), info.findtext("max"),
+                info.findtext("currencyCode"), info.findtext("type"),
+            )
         out.append(_posting(
             job_id, text("name"),
             location=text("office"),  # free text, e.g. "Remote (UTC +/- 2 hrs)"
             url=f"https://{token}.jobs.personio.de/job/{job_id}",
             description=description,
             department=text("department") or text("recruitingCategory"),
+            pay=pay,
         ))
     return out
 
@@ -376,6 +435,13 @@ async def scrape_pinpoint(client, token: str) -> list[dict]:
     for job in data.get("data", []):
         loc = job.get("location") or {}
         department = ((job.get("job") or {}).get("department") or {}).get("name")
+        pay = None
+        if job.get("compensation_visible", True):
+            pay = salary.structured(
+                job.get("compensation_minimum"), job.get("compensation_maximum"),
+                job.get("compensation_currency"), job.get("compensation_frequency"),
+                job.get("compensation"),
+            )
         out.append(_posting(
             job.get("id"), job.get("title"),
             location=loc.get("name"),
@@ -385,6 +451,7 @@ async def scrape_pinpoint(client, token: str) -> list[dict]:
             ))),
             department=department,
             native=_workplace(job.get("workplace_type")),
+            pay=pay,
         ))
     return out
 
@@ -466,6 +533,11 @@ async def scrape_polymer(client, token: str) -> list[dict]:
         )
         for job in data.get("items", []):
             remoteness = (job.get("remoteness_pretty") or "").lower()
+            # Formatted only, e.g. "180K - 220K USD a year" or "15 USD an hour".
+            text = (job.get("salary_pretty") or "").strip()
+            pay = (salary.parse_salary_text(text) or salary.structured(text=text)) if text else None
+            if pay:
+                pay["salary_source"] = "ats"
             out.append(_posting(
                 job.get("id"), job.get("title"),
                 location=job.get("display_location"),
@@ -473,6 +545,7 @@ async def scrape_polymer(client, token: str) -> list[dict]:
                 # department is null in practice; job_category_name carries it.
                 department=job.get("job_category_name"),
                 native="remote" if "remote" in remoteness else "hybrid" if "hybrid" in remoteness else None,
+                pay=pay,
             ))
         meta = data.get("meta") or {}
         if meta.get("is_last", True) or not meta.get("next_page"):
@@ -548,26 +621,46 @@ SCRAPERS = {
 }
 
 
+# Each detail fetcher returns (description_html, structured_pay_or_None).
+
+
 async def _smartrecruiters_detail(client, token, job_id):
     data = await _get_json(client, f"https://api.smartrecruiters.com/v1/companies/{token}/postings/{job_id}")
     sections = ((data.get("jobAd") or {}).get("sections") or {}).values()
-    return " ".join(s.get("text") or "" for s in sections if isinstance(s, dict))
+    comp = data.get("compensation") or {}
+    pay = salary.structured(comp.get("min"), comp.get("max"), comp.get("currency"), comp.get("period"))
+    return " ".join(s.get("text") or "" for s in sections if isinstance(s, dict)), pay
 
 
 async def _bamboohr_detail(client, token, job_id):
     data = await _get_json(client, f"https://{token}.bamboohr.com/careers/{job_id}/detail")
-    return ((data.get("result") or {}).get("jobOpening") or {}).get("description")
+    opening = (data.get("result") or {}).get("jobOpening") or {}
+    # Free text such as "DOE" (depends on experience) -- shown as written.
+    return opening.get("description"), salary.structured(text=opening.get("compensation"))
 
 
 async def _rippling_detail(client, token, job_id):
     data = await _get_json(client, f"https://api.rippling.com/platform/api/ats/v1/board/{token}/jobs/{job_id}")
     desc = data.get("description") or {}
-    return " ".join(filter(None, (desc.get("company"), desc.get("role")))) if isinstance(desc, dict) else desc
+    text = " ".join(filter(None, (desc.get("company"), desc.get("role")))) if isinstance(desc, dict) else desc
+    ranges = data.get("payRangeDetails") or []  # one entry per location tier
+    pay = None
+    if ranges:
+        r = ranges[0]
+        pay = salary.structured(r.get("rangeStart"), r.get("rangeEnd"), r.get("currency"), r.get("frequency"))
+    return text, pay
 
 
 async def _dover_detail(client, token, job_id):
     data = await _get_json(client, f"https://app.dover.com/api/v1/inbound/application-portal-job/{job_id}")
-    return data.get("user_provided_description")
+    comp = data.get("compensation") or {}
+    pay = None
+    if comp.get("open_to_sharing_comp"):
+        pay = salary.structured(
+            comp.get("lower_bound"), comp.get("upper_bound"), comp.get("currency_code"),
+            comp.get("salary_range_type"),
+        )
+    return data.get("user_provided_description"), pay
 
 
 _DETAIL_FETCHERS = {
@@ -578,20 +671,20 @@ _DETAIL_FETCHERS = {
 }
 
 
-async def fetch_description(platform: str, token: str, external_id: str) -> str | None:
-    """Per-job description for platforms whose list endpoint omits it and whose
-    hosted pages are JS-rendered. Returns None when there's no detail API or it
-    fails; callers then fall back to fetching the job page."""
+async def fetch_details(platform: str, token: str, external_id: str) -> tuple[str | None, dict | None]:
+    """(description, pay) for platforms whose list endpoint omits them and whose
+    hosted pages are JS-rendered. Returns (None, None) when there's no detail
+    API or it fails; callers then fall back to fetching the job page."""
     fetcher = _DETAIL_FETCHERS.get(platform)
     if fetcher is None:
-        return None
+        return None, None
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            text = _strip_html(await fetcher(client, token, external_id))
+            raw, pay = await fetcher(client, token, external_id)
     except (ScrapeError, httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         log.debug("detail fetch failed %s/%s/%s: %s", platform, token, external_id, exc)
-        return None
-    return text or None
+        return None, None
+    return _strip_html(raw) or None, pay
 
 
 async def scrape_company(client: httpx.AsyncClient, platform: str, token: str) -> list[dict]:

@@ -55,6 +55,27 @@ docker compose run --rm scraper-worker python scraper_worker.py --once
   sales architects. Non-engineering jobs are stored but not shown or scored.
   Non-software disciplines (data-center electrical, mechanical, …) are excluded.
 
+## Browsing and scoring
+
+- **Grouped by company, paginated on the server.** Each page holds 10
+  companies, ranked by their best match score, and shows each company's top 5
+  jobs. **Show more** pages further into one company. All slicing happens in
+  SQL (`GET /api/jobs/grouped`, `GET /api/jobs?company_id=…&page=…`), so page
+  size stays flat however many jobs are scraped.
+- **Check my fit** on a card scores that one job right away, using existing
+  company research. **Check fit for all N unscored** queues every job that
+  matches the current filters and isn't already scored or queued, and the page
+  refreshes as scores arrive. Each job costs one Gemini request.
+- **Salary** appears on every card, or "Not available". It comes from the
+  job board's structured pay field where there is one: Greenhouse
+  (`pay_transparency`), Ashby, Lever, Recruitee, Pinpoint, Personio, Breezy,
+  Polymer, and the detail APIs of SmartRecruiters, Rippling, Dover and
+  BambooHR. Otherwise it's parsed from a pay range written in the description.
+  The parser accepts only a currency-marked range with salary wording or a pay
+  period next to it, so funding amounts and contract values aren't misread.
+  For boards without list descriptions (e.g. Workday), salary shows up once
+  the description is fetched at scoring time.
+
 ## AI search
 
 Type what you want into **Ask AI** on the Jobs page. The normal filters run
@@ -132,8 +153,13 @@ instead, so `python app.py` alone is enough for quick local work.
 ## Tests
 
 ```bash
-python -m unittest discover tests      # classifier, remote detection, URL parsing
+python -m unittest discover tests      # classifier, salary, upserts, pagination, scoring API
 ```
+
+Tests run against a throwaway database and a fake Gemini key. **Every test
+module must start with `import tests`**, which points `DB_PATH` at a temp file
+before any app module loads. `tests.assert_isolated()` aborts the run if the
+database isn't the temp one, because the `.env` fallback is the live database.
 
 ## Operations
 

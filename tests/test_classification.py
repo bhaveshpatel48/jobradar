@@ -4,11 +4,15 @@ Cases come from real postings where an earlier rule got it wrong.
 Run: python -m unittest discover tests
 """
 
+import tests  # noqa: F401,I001 -- must come first: isolates DB_PATH
+
 import unittest
 
 from ats_detect import parse_url
 from ats_scraper import classify_remote
 from job_classify import is_engineering
+
+tests.assert_isolated()
 
 ENGINEERING = [
     ("Staff Software Engineer, API", "Engineering & Design - Product"),
@@ -29,6 +33,7 @@ ENGINEERING = [
     ("Data Scientist", None),
     ("Software Architect", None),
     ("Firmware Engineer", None),
+    ("UX Engineer", "Engineering & Design - Product"),
 ]
 
 NOT_ENGINEERING = [
@@ -47,6 +52,8 @@ NOT_ENGINEERING = [
     ("Product Designer", None),
     ("Account Executive", "Sales"),
     ("Technical Program Manager", None),
+    ("User Experience Researcher, Platform", "Engineering & Design - Product"),
+    ("UX Researcher", "Engineering"),
 ]
 
 

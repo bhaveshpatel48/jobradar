@@ -69,7 +69,7 @@ async function onUpload(event) {
   await act(async () => {
     const res = await api.uploadResume(file)
     resume.value = res.structured
-    if (!res.parsed) throw new Error('Resume stored, but parsing needs a Gemini API key.')
+    if (!res.parsed) throw new Error(res.parse_error || 'Resume saved, but it could not be parsed.')
   }, 'Resume uploaded and parsed.')
 }
 

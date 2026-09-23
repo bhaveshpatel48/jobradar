@@ -136,6 +136,13 @@ MIGRATIONS = [
     ("companies", "people_attempted_at", "REAL"),
     ("jobs", "department", "TEXT"),
     ("jobs", "is_engineering", "INTEGER NOT NULL DEFAULT 0"),
+    # Salary: numeric range when parseable, plus the display string as written.
+    ("jobs", "salary_min", "REAL"),
+    ("jobs", "salary_max", "REAL"),
+    ("jobs", "salary_currency", "TEXT"),
+    ("jobs", "salary_period", "TEXT"),  # year | month | hour
+    ("jobs", "salary_text", "TEXT"),
+    ("jobs", "salary_source", "TEXT"),  # ats (structured field) | description (parsed)
     ("user_settings", "scrape_scope", "TEXT NOT NULL DEFAULT 'preferred'"),  # preferred | all
     ("user_settings", "engineering_only", "INTEGER NOT NULL DEFAULT 1"),
 ]

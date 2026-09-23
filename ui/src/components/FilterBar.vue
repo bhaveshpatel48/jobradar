@@ -4,13 +4,14 @@ import { storeToRefs } from 'pinia'
 import { useJobsStore } from '@/stores/jobs'
 
 const store = useJobsStore()
-const { filters, companies, ai, jobs } = storeToRefs(store)
+const { filters, companies, ai, totalJobs, totalCompanies } = storeToRefs(store)
 
 let debounce
 function update(key, value, { immediate = true } = {}) {
   filters.value[key] = value
   clearTimeout(debounce)
-  debounce = setTimeout(() => store.load(), immediate ? 0 : 300)
+  // Any filter change starts over at page 1.
+  debounce = setTimeout(() => store.load(1), immediate ? 0 : 300)
 }
 
 const sortedCompanies = computed(() =>
@@ -20,7 +21,7 @@ const sortedCompanies = computed(() =>
 const aiSummary = computed(() => {
   const m = ai.value.meta
   if (!m) return ''
-  let s = `AI kept ${m.count} of ${m.judged} jobs`
+  let s = `AI kept ${m.total_jobs} of ${m.judged} jobs`
   if (m.truncated) s += ' (first 400 judged — narrow the filters for more)'
   if (m.partial) s += ' · some batches hit the rate limit, retry for the rest'
   return s
@@ -29,7 +30,7 @@ const aiSummary = computed(() => {
 
 <template>
   <div class="card bar-wrap">
-    <form class="ai row" @submit.prevent="store.runAi()">
+    <form class="ai row" @submit.prevent="store.runAi(1)">
       <input
         v-model="ai.query"
         class="grow"
@@ -84,7 +85,7 @@ const aiSummary = computed(() => {
         />
         Remote only
       </label>
-      <span class="muted count">{{ jobs.length }} jobs</span>
+      <span class="muted count">{{ totalJobs }} jobs · {{ totalCompanies }} companies</span>
     </div>
   </div>
 </template>

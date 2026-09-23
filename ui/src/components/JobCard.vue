@@ -1,8 +1,14 @@
 <script setup>
 import { ref, computed } from 'vue'
+import { formatSalary } from '@/salary'
 
-const props = defineProps({ job: { type: Object, required: true } })
-const emit = defineEmits(['open-company', 'set-status'])
+const props = defineProps({
+  job: { type: Object, required: true },
+  // 'running' while a score request is in flight, or an error message.
+  scoring: { type: String, default: null },
+  showCompany: { type: Boolean, default: true },
+})
+const emit = defineEmits(['open-company', 'set-status', 'score'])
 
 const expanded = ref(false)
 
@@ -16,6 +22,16 @@ const remote = computed(() => REMOTE_LABELS[props.job.remote_type] || REMOTE_LAB
 const hasReasoning = computed(() => Boolean(props.job.match_reasoning))
 const concerns = computed(() => props.job.match_concerns || [])
 const skills = computed(() => props.job.match_matched_skills || [])
+const salary = computed(() => formatSalary(props.job))
+
+const running = computed(() => props.scoring === 'running')
+const scoreError = computed(() => (props.scoring && props.scoring !== 'running' ? props.scoring : null))
+const scored = computed(() => props.job.match_score !== null && props.job.match_score !== undefined)
+const fitLabel = computed(() => {
+  if (running.value) return 'Checking fit…'
+  if (props.job.score_pending) return 'Queued for scoring…'
+  return scored.value ? 'Re-check fit' : 'Check my fit'
+})
 </script>
 
 <template>
@@ -27,20 +43,26 @@ const skills = computed(() => props.job.match_matched_skills || [])
         </a>
         <span v-else class="title">{{ job.title }}</span>
         <div class="row sub">
-          <button class="link" @click="emit('open-company', job.company_id)">
+          <button v-if="showCompany" class="link" @click="emit('open-company', job.company_id)">
             {{ job.company_name }}
           </button>
-          <span v-if="job.location" class="muted">· {{ job.location }}</span>
+          <span v-if="job.location" class="muted">{{ showCompany ? '· ' : '' }}{{ job.location }}</span>
         </div>
       </div>
       <div class="row badges">
         <span v-if="job.ai_relevance !== undefined" class="badge ai">AI {{ job.ai_relevance }}</span>
-        <span v-if="job.match_score !== null" class="badge score">{{ job.match_score }}% match</span>
+        <span v-if="scored" class="badge score">{{ job.match_score }}% match</span>
         <span class="badge" :class="remote[1]">{{ remote[0] }}</span>
       </div>
     </div>
 
-    <p v-if="job.department" class="dept muted">{{ job.department }}</p>
+    <div class="facts">
+      <span v-if="job.department" class="muted">{{ job.department }}</span>
+      <span :class="salary ? 'salary' : 'muted'">
+        <strong>Salary:</strong> {{ salary || 'Not available' }}
+      </span>
+    </div>
+
     <p v-if="job.ai_reason" class="ai-reason">{{ job.ai_reason }}</p>
 
     <p v-if="hasReasoning" class="why">
@@ -57,12 +79,21 @@ const skills = computed(() => props.job.match_matched_skills || [])
     </div>
 
     <div class="row actions">
+      <button
+        :class="scored ? '' : 'fit'"
+        :disabled="running || job.score_pending"
+        :title="scored ? 'Score this job again against your profile' : 'Score this job against your resume and preferences'"
+        @click="emit('score', job)"
+      >
+        {{ fitLabel }}
+      </button>
       <select :value="job.status" @change="emit('set-status', job, $event.target.value)">
         <option value="new">New</option>
         <option value="saved">Saved</option>
         <option value="applied">Applied</option>
         <option value="dismissed">Dismissed</option>
       </select>
+      <span v-if="scoreError" class="err">{{ scoreError }}</span>
     </div>
   </article>
 </template>
@@ -79,7 +110,8 @@ const skills = computed(() => props.job.match_matched_skills || [])
 }
 .badges { justify-content: flex-end; }
 .badge.ai { color: #a371f7; border-color: #a371f7; font-weight: 600; }
-.dept { margin: -4px 0 0; font-size: 13px; }
+.facts { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; margin-top: -4px; }
+.salary { color: var(--good); }
 .ai-reason {
   margin: 0;
   font-size: 14px;
@@ -96,4 +128,6 @@ const skills = computed(() => props.job.match_matched_skills || [])
 .detail p { margin: 0 0 6px; }
 .concerns { margin: 6px 0 0; padding-left: 18px; color: var(--warn); }
 .actions select { width: auto; }
+.fit { border-color: var(--accent); color: var(--accent); }
+.err { color: var(--bad); font-size: 13px; }
 </style>

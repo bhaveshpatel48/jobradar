@@ -21,6 +21,7 @@ import time
 
 import httpx
 
+import salary
 import task_queue as job_queue
 from ats_scraper import ScrapeError, scrape_company
 from config import SCRAPE_INTERVAL_SECONDS
@@ -34,42 +35,61 @@ NEW_COMPANY_POLL_SECONDS = 15
 
 
 def _upsert_job(conn, company_id: int, posting: dict) -> tuple[int | None, bool]:
-    """Insert or refresh a posting. Returns (job_id if newly created, is_engineering)."""
+    """Insert or refresh a posting in one atomic statement, keyed on
+    (company_id, external_id). Returns (job_id if newly created, is_engineering).
+
+    A single ON CONFLICT upsert, rather than check-then-insert, so two scrapers
+    running at once (the loop plus a manual --once) can't race on the same job.
+    """
     now = time.time()
     engineering = 1 if is_engineering(posting["title"], posting.get("department")) else 0
-    fields = (
-        posting["title"],
-        posting.get("location"),
-        posting.get("url"),
-        posting.get("description"),
-        posting.get("remote_type", "unknown"),
-        posting.get("department"),
-        engineering,
-    )
-    existing = conn.execute(
-        "SELECT id FROM jobs WHERE company_id = ? AND external_id = ?",
-        (company_id, posting["external_id"]),
-    ).fetchone()
-
-    if existing:
-        conn.execute(
-            # Boards without list descriptions send "", which must not wipe a
-            # description the agent worker fetched from the job page.
-            """UPDATE jobs SET title=?, location=?, url=?,
-                   description=COALESCE(NULLIF(?, ''), description), remote_type=?,
-                   department=?, is_engineering=?, last_seen_at=? WHERE id=?""",
-            (*fields, now, existing["id"]),
-        )
-        return None, bool(engineering)
-
-    cur = conn.execute(
+    row = conn.execute(
         """INSERT INTO jobs
            (company_id, external_id, title, location, url, description, remote_type,
-            department, is_engineering, status, first_seen_at, last_seen_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)""",
-        (company_id, posting["external_id"], *fields, now, now),
-    )
-    return cur.lastrowid, bool(engineering)
+            department, is_engineering, salary_min, salary_max, salary_currency,
+            salary_period, salary_text, salary_source, status, first_seen_at, last_seen_at)
+           VALUES (:company_id, :external_id, :title, :location, :url, :description,
+                   :remote_type, :department, :is_engineering, :salary_min, :salary_max,
+                   :salary_currency, :salary_period, :salary_text, :salary_source,
+                   'new', :now, :now)
+           ON CONFLICT(company_id, external_id) DO UPDATE SET
+               title = excluded.title,
+               location = excluded.location,
+               url = excluded.url,
+               -- Boards without list descriptions send "", which must not wipe a
+               -- description the agent worker fetched from the job page.
+               description = COALESCE(NULLIF(excluded.description, ''), jobs.description),
+               remote_type = excluded.remote_type,
+               department = excluded.department,
+               is_engineering = excluded.is_engineering,
+               -- Likewise, keep a salary parsed from a later-fetched description
+               -- when this scrape has none; a salary the board does send wins.
+               salary_min = CASE WHEN excluded.salary_source IS NULL THEN jobs.salary_min ELSE excluded.salary_min END,
+               salary_max = CASE WHEN excluded.salary_source IS NULL THEN jobs.salary_max ELSE excluded.salary_max END,
+               salary_currency = CASE WHEN excluded.salary_source IS NULL THEN jobs.salary_currency ELSE excluded.salary_currency END,
+               salary_period = CASE WHEN excluded.salary_source IS NULL THEN jobs.salary_period ELSE excluded.salary_period END,
+               salary_text = CASE WHEN excluded.salary_source IS NULL THEN jobs.salary_text ELSE excluded.salary_text END,
+               salary_source = COALESCE(excluded.salary_source, jobs.salary_source),
+               last_seen_at = excluded.last_seen_at
+           RETURNING id, first_seen_at""",
+        {
+            "company_id": company_id,
+            "external_id": posting["external_id"],
+            "title": posting["title"],
+            "location": posting.get("location"),
+            "url": posting.get("url"),
+            "description": posting.get("description"),
+            "remote_type": posting.get("remote_type", "unknown"),
+            "department": posting.get("department"),
+            "is_engineering": engineering,
+            **{k: posting.get(k) for k in salary.EMPTY},
+            "now": now,
+        },
+    ).fetchone()
+    # The update branch never touches first_seen_at, so it equals `now` only
+    # when this statement inserted the row.
+    created = row["first_seen_at"] == now
+    return (row["id"] if created else None), bool(engineering)
 
 
 def _companies_in_scope(only_unscraped: bool = False) -> list[dict]:
