@@ -91,10 +91,73 @@ CREATE TABLE IF NOT EXISTS job_queue (
     completed_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS discovery_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | running | done | failed
+    candidates INTEGER DEFAULT 0,
+    added INTEGER DEFAULT 0,
+    log TEXT,
+    error TEXT,
+    created_at REAL,
+    completed_at REAL
+);
+
+-- Every Gemini call from every process, so the api and agent worker share one
+-- per-minute budget instead of each throttling blind.
+CREATE TABLE IF NOT EXISTS llm_calls (
+    ts REAL NOT NULL,
+    priority TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_ts ON llm_calls(ts);
+
+-- Small cross-process flags, e.g. when the Gemini daily quota resets.
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_queue_status ON job_queue(status, id);
 CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs(company_id);
 CREATE INDEX IF NOT EXISTS idx_people_company ON people(company_id);
 """
+
+# (table, column, definition). Applied idempotently after SCHEMA, so fresh and
+# existing databases converge on the same shape.
+MIGRATIONS = [
+    ("companies", "source", "TEXT NOT NULL DEFAULT 'manual'"),  # manual | discovered
+    ("companies", "preferred", "INTEGER NOT NULL DEFAULT 1"),
+    ("companies", "careers_url", "TEXT"),
+    ("companies", "last_scraped_at", "REAL"),
+    ("companies", "last_scrape_error", "TEXT"),
+    # Attempt timestamps, not result presence, gate re-research -- otherwise a
+    # company with no findable info is re-researched for every one of its jobs.
+    ("companies", "research_attempted_at", "REAL"),
+    ("companies", "people_attempted_at", "REAL"),
+    ("jobs", "department", "TEXT"),
+    ("jobs", "is_engineering", "INTEGER NOT NULL DEFAULT 0"),
+    ("user_settings", "scrape_scope", "TEXT NOT NULL DEFAULT 'preferred'"),  # preferred | all
+    ("user_settings", "engineering_only", "INTEGER NOT NULL DEFAULT 1"),
+]
+
+POST_MIGRATION_SQL = """
+CREATE INDEX IF NOT EXISTS idx_jobs_engineering ON jobs(is_engineering, remote_type);
+CREATE INDEX IF NOT EXISTS idx_companies_preferred ON companies(preferred);
+"""
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, definition in MIGRATIONS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column in existing:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as exc:
+            # api/scraper/agent all run init_db at startup; losing the race is fine.
+            if "duplicate column" not in str(exc).lower():
+                raise
+    conn.executescript(POST_MIGRATION_SQL)
 
 
 def connect() -> sqlite3.Connection:
@@ -138,6 +201,7 @@ def transaction():
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         row = conn.execute("SELECT 1 FROM user_settings WHERE id = 1").fetchone()
         if row is None:
             conn.execute(

@@ -56,6 +56,16 @@ def mark_done(queue_id: int) -> None:
         )
 
 
+def release(queue_id: int) -> None:
+    """Return a claimed task to pending without counting the attempt."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE job_queue SET status = 'pending', started_at = NULL, "
+            "attempts = MAX(attempts - 1, 0) WHERE id = ?",
+            (queue_id,),
+        )
+
+
 def mark_failed(queue_id: int, error: str) -> None:
     """Retry until MAX_ATTEMPTS, then park the row as failed."""
     with get_conn() as conn:

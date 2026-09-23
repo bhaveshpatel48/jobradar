@@ -33,11 +33,15 @@ const skills = computed(() => props.job.match_matched_skills || [])
           <span v-if="job.location" class="muted">· {{ job.location }}</span>
         </div>
       </div>
-      <div class="row">
+      <div class="row badges">
+        <span v-if="job.ai_relevance !== undefined" class="badge ai">AI {{ job.ai_relevance }}</span>
         <span v-if="job.match_score !== null" class="badge score">{{ job.match_score }}% match</span>
         <span class="badge" :class="remote[1]">{{ remote[0] }}</span>
       </div>
     </div>
+
+    <p v-if="job.department" class="dept muted">{{ job.department }}</p>
+    <p v-if="job.ai_reason" class="ai-reason">{{ job.ai_reason }}</p>
 
     <p v-if="hasReasoning" class="why">
       <button class="link" @click="expanded = !expanded">
@@ -72,6 +76,15 @@ const skills = computed(() => props.job.match_matched_skills || [])
 .link {
   background: none; border: none; padding: 0;
   color: var(--accent); text-decoration: underline; font-size: inherit;
+}
+.badges { justify-content: flex-end; }
+.badge.ai { color: #a371f7; border-color: #a371f7; font-weight: 600; }
+.dept { margin: -4px 0 0; font-size: 13px; }
+.ai-reason {
+  margin: 0;
+  font-size: 14px;
+  border-left: 3px solid #a371f7;
+  padding-left: 10px;
 }
 .why { margin: 0; }
 .detail {

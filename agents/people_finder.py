@@ -1,8 +1,9 @@
 """People/Contact Finder Agent.
 
-Finds publicly named people at a company and their publicly indexed LinkedIn
-profile URL. Never fetches or reproduces LinkedIn page content -- the URL is
-stored as a pointer only, per the ground rules.
+Finds publicly named people at a company and their LinkedIn profile URL. Never
+fetches or reproduces LinkedIn page content -- the URL is stored as a pointer
+only. In the fallback path a LinkedIn URL is accepted only if it appears as a
+literal link on a page we fetched from the company's own site.
 """
 
 import logging
@@ -10,7 +11,7 @@ import re
 import time
 from urllib.parse import urlparse
 
-from config import COMPANY_RESEARCH_TTL_DAYS
+import sitefetch
 from db import get_conn
 from llm import gemini
 
@@ -30,18 +31,33 @@ Also report any company email addresses that appear publicly (for example on a
 contact page, in a press release, or in open-source commits), exactly as written.
 Only include people and emails you actually find in search results."""
 
-EXTRACT_PROMPT = """Convert the research notes below into strict JSON:
-
-{
+PEOPLE_SPEC = """{
   "people": [{"name": string, "title": string, "linkedin_url": string, "source": string}],
   "observed_emails": [string]
-}
+}"""
+
+EXTRACT_PROMPT = f"""Convert the research notes below into strict JSON:
+
+{PEOPLE_SPEC}
 
 Only include people explicitly named in the notes. Use null for a missing
 linkedin_url or title. Never invent a person or a URL. observed_emails must
 contain only addresses literally quoted in the notes."""
 
-EMAIL_RE = re.compile(r"[\w.+-]+@([\w-]+\.[\w.-]+)")
+PAGES_PROMPT = f"""Below are pages fetched from a company's own website, followed
+by the LinkedIn profile links and email addresses that literally appear on them.
+
+List the people these pages name as working at the company, as strict JSON:
+
+{PEOPLE_SPEC}
+
+Rules: only people named in the pages. linkedin_url must be copied exactly from
+the LINKEDIN LINKS list, or null -- never construct one. source is the page URL
+the person appears on. observed_emails may only contain addresses from the
+EMAILS list."""
+
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+LINKEDIN_PROFILE = re.compile(r"^https?://([a-z]{2,3}\.)?linkedin\.com/in/[^/?#]+/?", re.I)
 
 
 def _infer_pattern(emails: list[str], domain: str) -> str | None:
@@ -50,7 +66,7 @@ def _infer_pattern(emails: list[str], domain: str) -> str | None:
         if not isinstance(email, str) or "@" not in email:
             continue
         local, _, host = email.strip().lower().partition("@")
-        if domain not in host:
+        if not domain or domain not in host:
             continue
         if re.fullmatch(r"[a-z]+\.[a-z]+", local):
             return "first.last"
@@ -67,16 +83,29 @@ def _domain_of(website: str | None) -> str | None:
     return host[4:] if host.startswith("www.") else host or None
 
 
-def has_fresh_people(company_id: int) -> bool:
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT MAX(discovered_at) AS latest FROM people WHERE company_id = ?",
-            (company_id,),
-        ).fetchone()
-    latest = row["latest"] if row else None
-    if not latest:
-        return False
-    return (time.time() - latest) < COMPANY_RESEARCH_TTL_DAYS * 86400
+async def _from_pages(website: str | None) -> tuple[object, set[str]]:
+    pages = await sitefetch.fetch_company_pages(website)
+    if not pages:
+        return None, set()
+
+    linkedin_links: set[str] = set()
+    emails: set[str] = set()
+    for page in pages.values():
+        for link in page["links"]:
+            if link.startswith("mailto:"):
+                emails.add(link[7:].split("?")[0])
+            elif LINKEDIN_PROFILE.match(link):
+                linkedin_links.add(link.split("?")[0])
+        emails.update(EMAIL_RE.findall(page["text"]))
+
+    appendix = {
+        "LINKEDIN LINKS": "\n".join(sorted(linkedin_links)) or "(none)",
+        "EMAILS": "\n".join(sorted(emails)) or "(none)",
+    }
+    page_texts = {url: page["text"] for url, page in pages.items()}
+    page_texts.update(appendix)
+    payload = await gemini.json_from_pages(page_texts, PAGES_PROMPT)
+    return payload, linkedin_links
 
 
 async def find_people(company_id: int, name: str, website: str | None) -> int:
@@ -86,31 +115,38 @@ async def find_people(company_id: int, name: str, website: str | None) -> int:
         return 0
 
     site = f" ({website})" if website else ""
+    allowed_linkedin: set[str] | None = None
     try:
-        payload, _sources = await gemini.grounded_json(
-            RESEARCH_PROMPT.format(name=name, website=site), EXTRACT_PROMPT
-        )
-    except (ValueError, gemini.LLMUnavailable) as exc:
+        try:
+            payload, _sources = await gemini.grounded_json(
+                RESEARCH_PROMPT.format(name=name, website=site), EXTRACT_PROMPT
+            )
+        except gemini.GroundingUnavailable:
+            payload, allowed_linkedin = await _from_pages(website)
+    except gemini.LLMRateLimited:
+        raise
+    except (ValueError, gemini.LLMError) as exc:
         log.warning("people lookup failed for %s: %s", name, exc)
         return 0
 
     if not isinstance(payload, dict):
         return 0
 
-    people = payload.get("people") or []
     domain = _domain_of(website)
     pattern = _infer_pattern(payload.get("observed_emails") or [], domain or "")
 
     stored = 0
-    for person in people:
+    for person in payload.get("people") or []:
         if not isinstance(person, dict):
             continue
         person_name = (person.get("name") or "").strip()
         if not person_name:
             continue
 
-        linkedin = person.get("linkedin_url")
-        if linkedin and "linkedin.com" not in str(linkedin).lower():
+        linkedin = (person.get("linkedin_url") or "").split("?")[0] or None
+        if linkedin and not LINKEDIN_PROFILE.match(linkedin):
+            linkedin = None
+        if linkedin and allowed_linkedin is not None and linkedin not in allowed_linkedin:
             linkedin = None
 
         email, confidence = None, "none"

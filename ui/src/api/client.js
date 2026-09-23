@@ -14,6 +14,7 @@ async function request(path, options = {}) {
 
 export const api = {
   health: () => request('/api/health'),
+  clearQuota: () => request('/api/llm/quota/clear', { method: 'POST' }),
 
   jobs: (params = {}) => {
     const q = new URLSearchParams()
@@ -25,12 +26,22 @@ export const api = {
   },
   updateJob: (id, status) =>
     request(`/api/jobs/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  aiSearch: (query, filters) =>
+    request('/api/jobs/ai-search', { method: 'POST', body: JSON.stringify({ query, filters }) }),
+
+  ats: () => request('/api/ats'),
 
   companies: () => request('/api/companies'),
   addCompany: (payload) =>
     request('/api/companies', { method: 'POST', body: JSON.stringify(payload) }),
+  setPreferred: (id, preferred) =>
+    request(`/api/companies/${id}`, { method: 'PATCH', body: JSON.stringify({ preferred }) }),
   deleteCompany: (id) => request(`/api/companies/${id}`, { method: 'DELETE' }),
   companyProfile: (id) => request(`/api/companies/${id}/profile`),
+
+  discover: (query) =>
+    request('/api/discover', { method: 'POST', body: JSON.stringify({ query }) }),
+  discoveryRuns: () => request('/api/discover'),
 
   settings: () => request('/api/settings'),
   saveSettings: (payload) =>

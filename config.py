@@ -24,6 +24,10 @@ DB_PATH = os.environ.get("DB_PATH", "./data/jobradar.db")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+# Requests per minute across ALL processes. Background work leaves
+# GEMINI_INTERACTIVE_RESERVE of them free so AI search never queues behind scoring.
+GEMINI_RPM = _int("GEMINI_RPM", 6)
+GEMINI_INTERACTIVE_RESERVE = _int("GEMINI_INTERACTIVE_RESERVE", 2)
 
 HUNTER_API_KEY = os.environ.get("HUNTER_API_KEY")
 

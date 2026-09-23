@@ -69,14 +69,68 @@ Against a live Greenhouse board (627 postings) and the running stack:
 - Standalone `scraper_worker.py --once` in a container with nothing else running.
 - SPA rendering live data through the nginx `/api` proxy, no console errors.
 
+## Round 2: more ATS, scope, discovery, engineering filter, AI search
+
+### What the real Gemini key showed
+
+- **Free tier = 20 requests/day/model** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`).
+  I first read the 429s as a per-minute limit, which was wrong. The quota ID in
+  Google's error settled it. Handling: a daily-exhaustion flag in `app_state`
+  stops every container calling until midnight Pacific; a UI banner explains it;
+  "Retry now" clears the flag after a quota increase.
+- **No Google Search grounding quota** on this key (429 on every model), so
+  research/people fall back to fetching the company's own site. A circuit breaker
+  avoids re-trying grounding for 30 minutes.
+- `gemini-2.5-*` returns 404 for this key, as expected.
+
+### Bugs found and fixed
+
+- **Event loop reuse:** the single cached Gemini client failed on its second use
+  in a new event loop ("Event loop is closed"), so the second resume upload would
+  have crashed. Clients are now cached per loop.
+- **Re-research storm:** freshness was keyed on *having* a profile or people rows,
+  so a company where nothing was found got researched again for every one of its
+  jobs. Attempt timestamps on `companies` now gate it.
+- **Quota errors escaped agents:** the agents caught only `ValueError`, so Gemini
+  API errors failed whole tasks. Errors are now typed (`LLMError`,
+  `LLMRateLimited`, `LLMQuotaExhausted`, `GroundingUnavailable`). A rate limit
+  releases the task without using up a retry.
+- **Settings clobbering:** `POST /api/settings` wrote every field, so saving one
+  page reset another's settings (e.g. scrape scope). It's now a partial update.
+- **Descriptions wiped:** re-scraping boards that have no list descriptions
+  overwrote fetched descriptions with "". The upsert now keeps them.
+- **Per-process throttling was blind:** the API and agent worker shared one quota
+  but throttled separately. They now share a ledger table (`llm_calls`), and
+  background work leaves a reserve for interactive calls.
+
+### Decisions
+
+- **Discovery never trusts the model.** Candidates are stored only after a live
+  board probe returns jobs. Tested with fixed proposals: a wrong ATS hint was
+  corrected, and a made-up company was rejected.
+- **Engineering = title-first.** Departments are too mixed ("Security" covers
+  analysts, "Applied AI" covers pre-sales). A non-engineering department overrides
+  unless the title names an engineer. Non-software disciplines are excluded.
+  Cases live in `tests/test_classification.py`.
+- **Only engineering jobs are queued for scoring** when the filter is on, to
+  save quota. Toggling the filter off and pressing Re-score picks the rest up.
+- **Per-company cap of 1000 postings** (Workday and SmartRecruiters boards reach
+  thousands). NVIDIA Workday takes about 60s for 1000 jobs because pages are
+  capped at 20.
+- **Descriptions fetched lazily**, only for jobs about to be scored. Detail APIs
+  (SmartRecruiters, BambooHR, Rippling, Dover) come first, then JobPosting
+  JSON-LD, then page text.
+- **Comeet and Jobvite are not supported**: Comeet needs a token scraped out of
+  HTML, and Jobvite is HTML only.
+
 ## Not verified
 
-**No Gemini API key was available during the build**, so every LLM path is
-verified only for graceful degradation (missing key ⇒ skip, never crash) and
-against the SDK's real type signatures — not against live responses. Worth
-confirming on first run with a key:
-
-- That the configured model is accessible to your project.
-- That grounded calls return `grounding_chunks` (if empty, the fallback is to
-  ask for source URLs as a JSON field instead).
-- Match-score quality, and whether the matcher prompt needs tuning.
+- **Live AI search and live discovery.** Both are built and exercised to the
+  point of the Gemini call, and discovery's verification half was tested with
+  fixed proposals. The daily quota ran out before a live end-to-end run.
+  Worth checking once the quota resets.
+- BambooHR `locationType` → remote mapping (no remote example found live).
+- Whether Teamtailor's RSS feed caps its item count.
+- Lever EU boards (`api.eu.lever.co`).
+- Match-score quality on a real parsed resume (so far scored only against
+  interests).

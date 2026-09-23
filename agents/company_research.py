@@ -1,10 +1,15 @@
-"""Company Research Agent -- produces a sourced company_profiles row."""
+"""Company Research Agent -- produces a sourced company_profiles row.
+
+Prefers Google Search grounding. When the key has no grounding quota, falls
+back to the company's own pages; either way every stored fact traces to a URL
+that was actually retrieved.
+"""
 
 import json
 import logging
 import time
 
-from config import COMPANY_RESEARCH_TTL_DAYS
+import sitefetch
 from db import get_conn
 from llm import gemini
 
@@ -19,9 +24,7 @@ Report only what you can find in search results, and cite the source for each
 fact. If something cannot be found, say so explicitly -- do not estimate or
 infer funding amounts or headcounts."""
 
-EXTRACT_PROMPT = """Convert the research notes below into strict JSON:
-
-{
+FIELDS_SPEC = """{
   "summary": string,
   "mission": string,
   "funding_stage": string,
@@ -30,10 +33,24 @@ EXTRACT_PROMPT = """Convert the research notes below into strict JSON:
   "employee_count_estimate": string,
   "tech_stack": [string],
   "recent_news": [{"headline": string, "url": string, "date": string}]
-}
+}"""
+
+EXTRACT_PROMPT = f"""Convert the research notes below into strict JSON:
+
+{FIELDS_SPEC}
 
 Use null for any field the notes do not establish. Never invent a value. If the
 notes say something could not be found, that field is null."""
+
+PAGES_PROMPT = f"""Below are pages fetched from a company's own website. Build a
+profile using ONLY facts stated in these pages -- no outside knowledge.
+
+Return strict JSON:
+
+{FIELDS_SPEC}
+
+Use null for anything the pages do not state. recent_news items must use a URL
+from the pages provided. Do not guess funding, headcount, or dates."""
 
 
 def get_profile(company_id: int) -> dict | None:
@@ -44,30 +61,43 @@ def get_profile(company_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def is_fresh(profile: dict | None) -> bool:
-    if not profile or not profile.get("researched_at"):
-        return False
-    age = time.time() - profile["researched_at"]
-    return age < COMPANY_RESEARCH_TTL_DAYS * 86400
+async def _research_grounded(name: str, website: str | None):
+    site = f" ({website})" if website else ""
+    return await gemini.grounded_json(RESEARCH_PROMPT.format(name=name, website=site), EXTRACT_PROMPT)
+
+
+async def _research_from_pages(website: str | None):
+    pages = await sitefetch.fetch_company_pages(website)
+    if not pages:
+        return None, []
+    payload = await gemini.json_from_pages(
+        {url: page["text"] for url, page in pages.items()}, PAGES_PROMPT
+    )
+    return payload, list(pages)
 
 
 async def research_company(company_id: int, name: str, website: str | None) -> dict | None:
-    """Research and upsert. Returns the stored profile, or None on failure."""
+    """Research and upsert. Returns the stored profile, or None on failure.
+
+    Rate limits propagate (LLMRateLimited) so the worker can back off and retry.
+    """
     if not gemini.available():
         log.warning("no Gemini key configured; skipping company research")
         return None
 
-    site = f" ({website})" if website else ""
     try:
-        payload, sources = await gemini.grounded_json(
-            RESEARCH_PROMPT.format(name=name, website=site), EXTRACT_PROMPT
-        )
-    except (ValueError, gemini.LLMUnavailable) as exc:
+        try:
+            payload, sources = await _research_grounded(name, website)
+        except gemini.GroundingUnavailable:
+            payload, sources = await _research_from_pages(website)
+    except gemini.LLMRateLimited:
+        raise
+    except (ValueError, gemini.LLMError) as exc:
         log.warning("company research failed for %s: %s", name, exc)
         return None
 
-    if not isinstance(payload, dict):
-        log.warning("company research returned no usable JSON for %s", name)
+    if not isinstance(payload, dict) or not sources:
+        log.info("no sourced research found for %s", name)
         return None
 
     record = {

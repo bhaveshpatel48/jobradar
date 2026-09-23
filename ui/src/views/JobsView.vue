@@ -9,11 +9,11 @@ import CompanyDrawer from '@/components/CompanyDrawer.vue'
 
 const store = useJobsStore()
 const settings = useSettingsStore()
-const { jobs, loading, error, filters } = storeToRefs(store)
+const { jobs, loading, error, ai } = storeToRefs(store)
 const openCompanyId = ref(null)
 
 onMounted(async () => {
-  await Promise.all([store.load(), settings.load()])
+  await Promise.all([store.load(), store.loadCompanies(), settings.load()])
 })
 
 const needsProfile = computed(() => {
@@ -30,12 +30,17 @@ const needsProfile = computed(() => {
       <RouterLink to="/settings">Set up your profile</RouterLink> to see match scores.
     </p>
 
-    <FilterBar :filters="filters" :count="jobs.length" @change="store.load()" />
+    <FilterBar />
 
-    <p v-if="loading" class="muted">Loading jobs…</p>
+    <p v-if="loading || ai.loading" class="muted">
+      {{ ai.loading ? 'AI is reading the job list…' : 'Loading jobs…' }}
+    </p>
     <p v-else-if="error" class="muted">{{ error }}</p>
     <p v-else-if="!jobs.length" class="muted">
-      No jobs match. Add companies to track, then run the scraper.
+      <template v-if="ai.active">No jobs fit that request. Try wording it more broadly.</template>
+      <template v-else>
+        No jobs match. Track companies on the <RouterLink to="/sources">Sources</RouterLink> page.
+      </template>
     </p>
 
     <div v-else class="stack">

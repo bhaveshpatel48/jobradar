@@ -101,7 +101,9 @@ async def score_job(job: dict, settings: dict, company_profile: dict | None) -> 
 
     try:
         result = await gemini.generate_json(prompt)
-    except (ValueError, gemini.LLMUnavailable) as exc:
+    except gemini.LLMRateLimited:
+        raise
+    except (ValueError, gemini.LLMError) as exc:
         log.warning("scoring failed for job %s: %s", job.get("id"), exc)
         return None
 

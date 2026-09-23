@@ -13,22 +13,15 @@ const form = reactive({
   min_years_experience: null,
   max_years_experience: null,
   remote_only: true,
+  engineering_only: true,
 })
 
 const resume = ref(null)
 const message = ref('')
 const busy = ref(false)
-const companies = ref([])
-const newCompany = reactive({ name: '', platform: 'greenhouse', board_token: '', website: '' })
-
-const PLATFORMS = ['greenhouse', 'lever', 'ashby', 'workable', 'smartrecruiters', 'recruitee']
 
 function toList(s) {
   return s.split(',').map((x) => x.trim()).filter(Boolean)
-}
-
-async function loadCompanies() {
-  companies.value = (await api.companies()).companies
 }
 
 onMounted(async () => {
@@ -42,8 +35,8 @@ onMounted(async () => {
   form.min_years_experience = d.min_years_experience
   form.max_years_experience = d.max_years_experience
   form.remote_only = Boolean(d.remote_only)
+  form.engineering_only = Boolean(d.engineering_only)
   resume.value = d.resume_structured
-  await loadCompanies()
 })
 
 async function act(fn, ok) {
@@ -86,19 +79,6 @@ const rescore = () =>
     message.value = `Queued ${r.queued} jobs for re-scoring.`
   }, '')
 
-const addCompany = () =>
-  act(async () => {
-    await api.addCompany({ ...newCompany })
-    Object.assign(newCompany, { name: '', platform: 'greenhouse', board_token: '', website: '' })
-    await loadCompanies()
-  }, 'Company added.')
-
-const removeCompany = (id) =>
-  act(async () => {
-    await api.deleteCompany(id)
-    await loadCompanies()
-  }, 'Company removed.')
-
 function purge() {
   if (!confirm('Delete all company research and people data?')) return
   act(() => api.purgeResearch(), 'Research data deleted.')
@@ -108,7 +88,6 @@ function wipe() {
   if (!confirm('Wipe the entire database? Jobs, companies and research will be lost.')) return
   act(async () => {
     await api.wipeAll()
-    await loadCompanies()
     resume.value = null
   }, 'Database wiped.')
 }
@@ -166,48 +145,19 @@ function wipe() {
         <input v-model="form.remote_only" type="checkbox" style="width:auto" />
         Remote only
       </label>
+      <label class="row">
+        <input v-model="form.engineering_only" type="checkbox" style="width:auto" />
+        Engineering roles only (other roles are stored but not shown or scored)
+      </label>
       <div class="row">
         <button class="primary" :disabled="busy" @click="save">Save settings</button>
         <button :disabled="busy" @click="rescore">Re-score all jobs</button>
       </div>
     </section>
 
-    <section class="card stack">
-      <h2>Tracked companies</h2>
-      <ul v-if="companies.length" class="list">
-        <li v-for="c in companies" :key="c.id" class="row">
-          <span><strong>{{ c.name }}</strong> <span class="muted">· {{ c.platform }}</span></span>
-          <button class="danger" :disabled="busy" @click="removeCompany(c.id)">Remove</button>
-        </li>
-      </ul>
-      <p v-else class="muted">No companies tracked yet.</p>
-
-      <div class="grid-2">
-        <div class="field">
-          <label>Name</label>
-          <input v-model="newCompany.name" placeholder="Anthropic" />
-        </div>
-        <div class="field">
-          <label>Platform</label>
-          <select v-model="newCompany.platform">
-            <option v-for="p in PLATFORMS" :key="p" :value="p">{{ p }}</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>Board token</label>
-          <input v-model="newCompany.board_token" placeholder="anthropic" />
-        </div>
-        <div class="field">
-          <label>Website (optional)</label>
-          <input v-model="newCompany.website" placeholder="anthropic.com" />
-        </div>
-      </div>
-      <div>
-        <button :disabled="busy || !newCompany.name || !newCompany.board_token" @click="addCompany">
-          Add company
-        </button>
-      </div>
-    </section>
+    <p class="muted small">
+      Companies and job boards are managed on the <RouterLink to="/sources">Sources</RouterLink> page.
+    </p>
 
     <section class="card stack">
       <h2>Data</h2>
@@ -225,6 +175,5 @@ h2 { margin: 0; font-size: 17px; }
 .notice { border-color: var(--accent); }
 .preview { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; font-size: 14px; }
 .preview p { margin: 0 0 6px; }
-.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.list li { justify-content: space-between; }
+.small { font-size: 13px; margin: 0; }
 </style>

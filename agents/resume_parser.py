@@ -33,8 +33,10 @@ async def parse_resume(resume_text: str) -> dict | None:
         return None
 
     try:
-        return await gemini.generate_json(PROMPT.format(text=resume_text[:30000]))
-    except (ValueError, gemini.LLMUnavailable) as exc:
+        return await gemini.generate_json(
+            PROMPT.format(text=resume_text[:30000]), priority=gemini.INTERACTIVE
+        )
+    except (ValueError, gemini.LLMError) as exc:
         log.warning("resume parsing failed: %s", exc)
         return None
 
