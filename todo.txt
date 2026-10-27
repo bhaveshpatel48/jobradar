@@ -7,6 +7,18 @@
 - Quality jobs are based on the resume and preferences user set
 
 
+Build job card like cutshort
+- show location on job card
+- show reqiored stack on card (like Himalayas)
+
+Search filter for remote india jobs
+
+Company Searchale dropdown
+
+ add job aggreagators as the source too for job scrap
+ filterls like remoteyeah platforms (minimum salary and benifits)
+
+
 
 Advanced
 - This shoud support the multiple vendors for the LLM and the calls should be openai format or standard followed
@@ -14,4 +26,4 @@ Advanced
 - Use the inference routing based on the complexity of the work
 - Scale for other users
 - Use postgresql
-- 
+- Integrate the https://app.apollo.io/ for email and number finding and then send email
